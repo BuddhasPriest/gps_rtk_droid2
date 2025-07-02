@@ -26,6 +26,8 @@ import java.io.File // ★追加
 import java.io.FileWriter // ★追加
 import java.io.IOException // ★追加
 
+import android.view.WindowManager // 画面常時オンのデバッグ用
+
 
 data class GpsData(
     val timestamp: String,
@@ -83,6 +85,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // ★デバッグ用: 画面を常にオンにするためのフラグを追加 (テスト用) ★
+        // ★この行は問題解決後に削除してください
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
         usbManager = getSystemService(USB_SERVICE) as UsbManager
         binding.logTextView.movementMethod = ScrollingMovementMethod()
@@ -194,6 +201,7 @@ class MainActivity : AppCompatActivity() {
             usbGpsConnection = UsbGpsConnection(usbManager, usbDevice!!).apply {
                 setDataListener(object : UsbGpsConnection.GpsDataListener {
                     override fun onGpsDataReceived(data: String) {
+                        Log.d("GPS_RAW_RECEIVE", "Raw NMEA data received: $data")
                         parseGpsData(data) // ★ここに修正を加え、ファイル保存ロジックを追加
                     }
 
@@ -441,6 +449,8 @@ class MainActivity : AppCompatActivity() {
 
     // パース済みGPSデータをファイルにログ保存する関数
     private fun logParsedGpsDataToFile(gpsData: GpsData) {
+        Log.d("FILE_LOG_WRITER", "Attempting to write GPS data to file for timestamp: ${gpsData.timestamp}")
+
         executor.execute { // ファイル書き込みはI/O操作なので別スレッドで実行
             try {
                 // アプリ固有の外部ストレージディレクトリにCSV形式で保存
@@ -451,6 +461,7 @@ class MainActivity : AppCompatActivity() {
                 if (!logFile.exists()) {
                     FileWriter(logFile, true).use { writer ->
                         writer.append("Timestamp,Latitude,Longitude,Altitude,Heading,RtkStatus,RawNMEA\n") // ★ヘッダーにRtkStatusを追加
+                        //writer.flush()
                     }
                 }
 
@@ -463,9 +474,12 @@ class MainActivity : AppCompatActivity() {
                             "${gpsData.heading?.let { "%.2f".format(it) } ?: ""}," +
                             "${gpsData.rtkStatus ?: ""}," + // ★RTKステータスを追加
                             "\"${gpsData.rawNmea}\"\n") // CSVでカンマを含む場合のために引用符で囲む
+                    //writer.flush()
                 }
+                Log.d("FILE_LOG_WRITER", "Successfully wrote GPS data to file for timestamp: ${gpsData.timestamp}")
             } catch (e: IOException) {
                 Log.e("MainActivity", "パース済みログファイルへの書き込みエラー: ${e.message}")
+                Log.e("FILE_LOG_ERROR", "Error writing GPS data to file: ${e.message}", e)
             }
         }
     }
