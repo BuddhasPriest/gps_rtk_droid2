@@ -52,6 +52,8 @@ class MainActivity : AppCompatActivity() {
     // PowerManagerとWakeLockのインスタンス
     private lateinit var wakeLock: PowerManager.WakeLock
 
+    private var writer: FileWriter? = null
+
     // USB接続のブロードキャストレシーバー
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -102,6 +104,18 @@ class MainActivity : AppCompatActivity() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gps_rtk_droid2::MyWakeLockTag")
 
+        try{
+            val logFile = File(getExternalFilesDir(null), "gps_rtk_raw_log.csv")
+            writer = FileWriter(logFile, true)
+
+            //if(!logFile.exists()){
+                writer?.append("Time,Lat,Lon,Alt,Heading,Rtk,Raw\n")
+                writer?.flush()
+            //}
+        } catch (e: IOException){
+            Log.e("FILE_LOG_ERROR","File open error: ${e.message}", e)
+        }
+
         startMyForegroundService()
 
         // デバッグ用: 接続されているUSBデバイスのVID/PIDをログに出力
@@ -136,6 +150,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        try{
+            writer?.close()
+        } catch (e: IOException){
+            Log.e("FILE_LOG_ERROR","File close error: ${e.message}", e)
+        }
         stopConnection()
         stopMyForegroundService()
     }
@@ -451,36 +471,50 @@ class MainActivity : AppCompatActivity() {
     private fun logParsedGpsDataToFile(gpsData: GpsData) {
         Log.d("FILE_LOG_WRITER", "Attempting to write GPS data to file for timestamp: ${gpsData.timestamp}")
 
-        executor.execute { // ファイル書き込みはI/O操作なので別スレッドで実行
+        executor.execute {
+            //var writer: FileWriter? = null
             try {
-                // アプリ固有の外部ストレージディレクトリにCSV形式で保存
-                // 例: /sdcard/Android/data/com.example.gps_rtk_droid2/files/gps_rtk_parsed_log.csv
-                val logFile = File(getExternalFilesDir(null), "gps_rtk_parsed_log.csv")
+                //val logFile = File(getExternalFilesDir(null), "gps_rtk_parsed_log.csv")
 
-                // ヘッダー行を書き込む (ファイルが新規作成される場合のみ)
+                // ファイルが存在しない場合のみヘッダーを書き込む
+                /*
                 if (!logFile.exists()) {
-                    FileWriter(logFile, true).use { writer ->
-                        writer.append("Timestamp,Latitude,Longitude,Altitude,Heading,RtkStatus,RawNMEA\n") // ★ヘッダーにRtkStatusを追加
-                        //writer.flush()
-                    }
+                    writer = FileWriter(logFile, true)
+                    writer.append("Timestamp,Latitude,Longitude,Altitude,Heading,RtkStatus,RawNMEA\n")
+                    writer.flush()
+                    //writer.close()
                 }
+                */
 
                 // データ行を書き込む (CSV形式)
-                FileWriter(logFile, true).use { writer ->
-                    writer.append("${gpsData.timestamp}," +
+                //writer = FileWriter(logFile, true)
+                writer?.let {
+                    Log.d("FILE_LOG_WRITER", "Writing data to file for timestamp: ${gpsData.timestamp}")
+                    it.append(
+                        "${gpsData.timestamp}," +
                             "${gpsData.latitude?.let { "%.6f".format(it) } ?: ""}," +
                             "${gpsData.longitude?.let { "%.6f".format(it) } ?: ""}," +
                             "${gpsData.altitude?.let { "%.3f".format(it) } ?: ""}," +
                             "${gpsData.heading?.let { "%.2f".format(it) } ?: ""}," +
-                            "${gpsData.rtkStatus ?: ""}," + // ★RTKステータスを追加
-                            "\"${gpsData.rawNmea}\"\n") // CSVでカンマを含む場合のために引用符で囲む
-                    //writer.flush()
-                }
-                Log.d("FILE_LOG_WRITER", "Successfully wrote GPS data to file for timestamp: ${gpsData.timestamp}")
+                            "${gpsData.rtkStatus ?: ""}," +
+                            "\"${gpsData.rawNmea.replace("\"", "\"\"")}\"\n")
+                    it.flush()
+                    Log.d(
+                        "FILE_LOG_WRITER",
+                        "Successfully wrote GPS data to file for timestamp: ${gpsData.timestamp}"
+                    )
+                } ?: Log.e("FILE_LOG_ERROR","File writer is null.")
             } catch (e: IOException) {
-                Log.e("MainActivity", "パース済みログファイルへの書き込みエラー: ${e.message}")
-                Log.e("FILE_LOG_ERROR", "Error writing GPS data to file: ${e.message}", e)
+                Log.e("FILE_LOG_ERROR", "Data write error: ${e.message}", e)
+            } catch (e: Exception) {
+                Log.e("FILE_LOG_ERROR", "Unexpected error: ${e.message}", e)
+            } finally {
+                //writer?.close()
             }
         }
     }
+
+
+
+
 }
