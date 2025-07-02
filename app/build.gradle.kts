@@ -60,8 +60,8 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 
     // その他の依存関係
-    implementation("androidx.core:core-ktx:1.7.0")
-    implementation("androidx.appcompat:appcompat:1.4.1")
+    implementation("androidx.core:core-ktx:1.9.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.5.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.3")
 
@@ -71,4 +71,9 @@ dependencies {
     //implementation("com.github.mik3y:usb-serial-for-android:3.4.6")
     implementation("com.github.mik3y:usb-serial-for-android:3.9.0")
     //implementation("com.hoho.android.usbserial:usbserial:1.2")
+    implementation("androidx.annotation:annotation:1.6.0")
+
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3") // 最新の安定バージョンを使用してください
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3") // 最新の安定バージョンを使用してください
+
 }

@@ -26,7 +26,8 @@ class NtripClient(
     private var reader: BufferedReader? = null
     private var writer: BufferedWriter? = null
     private var rtcmInputStream: InputStream? = null // RTCMデータ用
-    private var isConnected = false
+    var isConnected = false
+        private set // 外部からは読み取りのみ可能
 
     // 接続タイムアウト時間を設定 (ミリ秒)
     private val CONNECT_TIMEOUT_MS = 10000 // 例: 10秒
@@ -35,118 +36,96 @@ class NtripClient(
 
     interface NtripClientListener {
         fun onRtcmDataReceived(data: ByteArray)
-        fun onStatusChanged(message: String)
+        fun onStatusChanged(status: String)
         fun onError(error: String)
     }
 
+    @Throws(IOException::class)
     fun connect() {
         if (isConnected) {
             listener.onStatusChanged("NTRIP: 既に接続済みです。")
             return
         }
 
+        listener.onStatusChanged("NTRIP: $server:$port/$mountPoint に接続中...")
+
         try {
-            listener.onStatusChanged("NTRIP: 接続中 $server:$port/$mountPoint...")
-
-            // ソケットを初期化 (SSL/TLS対応)
-            socket = if (port == 443) {
-                // HTTPS (SSL/TLS) の場合
-                SSLSocketFactory.getDefault().createSocket()
-            } else {
-                // HTTP の場合
-                Socket()
-            }
-
-            // 接続タイムアウトを設定して接続
+            socket = Socket()
             socket?.connect(InetSocketAddress(server, port), CONNECT_TIMEOUT_MS)
-            // データ読み込みタイムアウトを設定
-            socket?.soTimeout = READ_TIMEOUT_MS
+            socket?.soTimeout = READ_TIMEOUT_MS // 読み込みタイムアウトを設定
 
-            // ヘッダー送受信用のReader/Writer (ISO_8859_1はNTRIPの標準エンコーディング)
-            reader = BufferedReader(InputStreamReader(socket!!.getInputStream(), Charsets.ISO_8859_1))
-            writer = BufferedWriter(OutputStreamWriter(socket!!.getOutputStream(), Charsets.ISO_8859_1))
+            reader = BufferedReader(InputStreamReader(socket!!.getInputStream()))
+            writer = BufferedWriter(OutputStreamWriter(socket!!.getOutputStream()))
+            rtcmInputStream = socket!!.getInputStream() // RTCMバイナリデータ読み込み用
 
-            // RTCMデータ受信用のInputStream (バイナリデータ)
-            rtcmInputStream = socket!!.getInputStream()
-
-            // NTRIPリクエストの送信
+            // NTRIPリクエストを送信
             val request = buildNtripRequest()
             writer?.write(request)
             writer?.flush()
-            listener.onStatusChanged("NTRIP: リクエストを送信しました。")
 
-            // 応答ヘッダーの読み込みと確認
-            var line: String?
-            val headers = mutableListOf<String>()
-            var responseStatusOk = false
-            while (reader?.readLine().also { line = it } != null) {
-                if (line!!.isEmpty()) break // 空行でヘッダー終了
-                headers.add(line!!)
-                listener.onStatusChanged("NTRIP RCV Header: $line") // ヘッダーをログに出す
-
-                if (line!!.contains("HTTP/1.0 200 OK", ignoreCase = true) || line!!.contains("ICY 200 OK", ignoreCase = true)) {
-                    responseStatusOk = true
-                } else if (line!!.contains("HTTP/1.0 401 Unauthorized", ignoreCase = true)) {
-                    listener.onError("NTRIP: 認証失敗 (401 Unauthorized)。ユーザー名/パスワードを確認してください。")
-                    disconnect()
-                    return
-                } else if (line!!.contains("HTTP/1.0 404 Not Found", ignoreCase = true)) {
-                    listener.onError("NTRIP: マウントポイントが見つかりません (404 Not Found)。マウントポイント名を確認してください。")
-                    disconnect()
-                    return
-                }
+            // Caster Responseの最初の行を読み取る
+            val responseLine = reader?.readLine()
+            if (responseLine == null || !responseLine.startsWith("ICY 200 OK") && !responseLine.startsWith("HTTP/1.0 200 OK")) {
+                val errorMessage = "NTRIP: Caster Responseエラー: ${responseLine ?: "レスポンスなし"}"
+                listener.onError(errorMessage)
+                disconnect()
+                throw IOException(errorMessage)
             }
 
-            if (!responseStatusOk) {
-                listener.onError("NTRIP: サーバーから200 OK応答がありませんでした。受信ヘッダー:\n${headers.joinToString("\n")}")
-                disconnect()
-                return
+            // HTTPヘッダーの残りを読み飛ばす
+            var line: String?
+            while (reader?.readLine().also { line = it } != null && line!!.isNotEmpty()) {
+                // ヘッダーをログに出力するなど、必要に応じて処理
+                // Log.d("NtripClient", "Header: $line")
             }
 
             isConnected = true
-            listener.onStatusChanged("NTRIP: 接続成功。RTCMデータを受信中...")
+            listener.onStatusChanged("NTRIP: $mountPoint に接続しました。RTCMデータ受信待機中。")
 
-            // RTCMデータ受信ループ
+            // RTCMデータを連続して読み取る
             val buffer = ByteArray(4096) // 適切なバッファサイズ
-            var bytesRead: Int = -1 // 初期化はwhileループ内で確実に行われる
-            while (isConnected && rtcmInputStream?.read(buffer).also { bytesRead = it ?: -1 } != -1) {
-                if (bytesRead > 0) {
-                    val data = buffer.copyOf(bytesRead)
-                    listener.onRtcmDataReceived(data)
+            while (isConnected) {
+                val bytesRead = rtcmInputStream?.read(buffer)
+                if (bytesRead != null && bytesRead > 0) {
+                    val receivedData = buffer.copyOfRange(0, bytesRead)
+                    listener.onRtcmDataReceived(receivedData)
+                } else if (bytesRead == -1) {
+                    // ストリームの終端に達した（サーバーが切断した）
+                    listener.onError("NTRIP: サーバーが切断しました。")
+                    break
                 }
             }
 
-        } catch (e: SocketTimeoutException) {
-            listener.onError("NTRIP: 接続またはデータ受信がタイムアウトしました: ${e.message}")
-        } catch (e: ConnectException) {
-            listener.onError("NTRIP: 接続が拒否されました (サーバーが起動しない、ポートが誤っているなど): ${e.message}")
         } catch (e: UnknownHostException) {
-            listener.onError("NTRIP: ホスト名が見つかりません (サーバーアドレスを確認してください): ${e.message}")
+            listener.onError("NTRIP: ホスト名解決エラー: ${e.message}")
+            throw e
+        } catch (e: ConnectException) {
+            listener.onError("NTRIP: 接続拒否またはタイムアウト: ${e.message}")
+            throw e
+        } catch (e: SocketTimeoutException) {
+            listener.onError("NTRIP: ソケットタイムアウト: ${e.message}")
+            throw e
         } catch (e: IOException) {
-            if (isConnected) { // 接続中に発生したI/O例外は接続切断とみなす
-                listener.onError("NTRIP: 接続が失われました: ${e.message}")
-            } else { // 接続確立前に発生したI/O例外は接続失敗とみなす
-                listener.onError("NTRIP: 接続に失敗しました: ${e.message}")
-            }
+            listener.onError("NTRIP: IOエラー: ${e.message}")
+            throw e
         } catch (e: Exception) {
-            listener.onError("NTRIP: 予期せぬエラーが発生しました: ${e.message}")
+            listener.onError("NTRIP: 予期せぬエラー: ${e.message}")
+            throw e
         } finally {
-            // 接続が確立できなかった場合、またはエラーで切断が必要な場合
-            if (!isConnected) {
-                disconnect() // 必ずリソースを解放
+            if (!isConnected) { // 接続が確立できなかった、またはループを抜けた場合にのみdisconnectを呼ぶ
+                disconnect()
             }
-            // isConnectedがtrueであれば、disconnectは明示的に呼ばれるまで待つ
         }
     }
 
     fun disconnect() {
         if (!isConnected && socket == null) {
-            // すでに切断済みか、初期状態であれば何もしない
+            listener.onStatusChanged("NTRIP: 既に切断済みです。")
             return
         }
 
-        listener.onStatusChanged("NTRIP: 切断中...")
         var disconnectError: String? = null
+
         try {
             reader?.close()
         } catch (e: IOException) {
@@ -203,8 +182,6 @@ class NtripClient(
             headers.add("Authorization: Basic $authString")
         }
 
-        return headers.joinToString("\r\n") + "\r\n\r\n"
+        return headers.joinToString("\r\n", postfix = "\r\n\r\n")
     }
-
-    fun isConnected(): Boolean = isConnected
 }

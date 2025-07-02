@@ -38,23 +38,23 @@
                         android:layout_marginBottom="8dp" />
 
                     <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="NTRIP Server"
-                        android:layout_marginBottom="8dp">
+                        android:hint="NTRIPサーバーアドレス">
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/ntripServerEditText"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:inputType="textUri"
-                            android:text="rtk2go.com" />
+                            android:inputType="textUri" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="Port"
-                        android:layout_marginBottom="8dp">
+                        android:hint="ポート番号 (例: 2101)"
+                        android:layout_marginTop="8dp">
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/ntripPortEditText"
                             android:layout_width="match_parent"
@@ -64,35 +64,37 @@
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="Mountpoint"
-                        android:layout_marginBottom="8dp">
+                        android:hint="マウントポイント"
+                        android:layout_marginTop="8dp">
                         <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/ntripMountpointEditText"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:inputType="text"
-                            android:text="ANY" />
-                    </com.google.android.material.textfield.TextInputLayout>
-
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:hint="Username (optional)"
-                        android:layout_marginBottom="8dp">
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/ntripUserEditText"
+                            android:id="@+id/ntripMountPointEditText"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:inputType="text" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="Password (optional)"
-                        android:layout_marginBottom="16dp">
+                        android:hint="ユーザー名 (オプション)"
+                        android:layout_marginTop="8dp">
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/ntripUsernameEditText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="パスワード (オプション)"
+                        android:layout_marginTop="8dp">
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/ntripPasswordEditText"
                             android:layout_width="match_parent"
@@ -104,19 +106,19 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
-                        android:gravity="center_horizontal">
-
+                        android:layout_marginTop="16dp">
                         <Button
                             android:id="@+id/connectButton"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="wrap_content"
-                            android:text="接続"
-                            android:layout_marginEnd="8dp"/>
-
+                            android:layout_weight="1"
+                            android:text="接続" />
                         <Button
                             android:id="@+id/disconnectButton"
-                            android:layout_width="wrap_content"
+                            android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="8dp"
                             android:text="切断" />
                     </LinearLayout>
                 </LinearLayout>
@@ -148,17 +150,14 @@
                         android:orientation="horizontal"
                         android:layout_marginBottom="4dp">
                         <TextView
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="緯度:" />
+                            android:text="緯度:"
+                            android:textStyle="bold"/>
                         <TextView
-                            android:id="@+id/latitudeTextView"
-                            android:layout_width="0dp"
+                            android:id="@+id/latitudeTextView"  android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="2"
-                            android:text="N/A"
-                            android:textStyle="bold" />
+                            android:layout_marginStart="8dp"/>
                     </LinearLayout>
 
                     <LinearLayout
@@ -167,17 +166,14 @@
                         android:orientation="horizontal"
                         android:layout_marginBottom="4dp">
                         <TextView
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="経度:" />
+                            android:text="経度:"
+                            android:textStyle="bold"/>
                         <TextView
-                            android:id="@+id/longitudeTextView"
-                            android:layout_width="0dp"
+                            android:id="@+id/longitudeTextView" android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="2"
-                            android:text="N/A"
-                            android:textStyle="bold" />
+                            android:layout_marginStart="8dp"/>
                     </LinearLayout>
 
                     <LinearLayout
@@ -186,59 +182,32 @@
                         android:orientation="horizontal"
                         android:layout_marginBottom="4dp">
                         <TextView
-                            android:layout_width="0dp"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="高度:" />
+                            android:text="高度:"
+                            android:textStyle="bold"/>
                         <TextView
-                            android:id="@+id/altitudeTextView"
-                            android:layout_width="0dp"
+                            android:id="@+id/altitudeTextView"  android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="2"
-                            android:text="N/A"
-                            android:textStyle="bold" />
+                            android:layout_marginStart="8dp"/>
                     </LinearLayout>
 
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
+                        android:gravity="center_vertical"
                         android:layout_marginBottom="4dp">
                         <TextView
-                            android:layout_width="0dp"
+                            android:id="@+id/rtkStatusTextView" android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="方位:" />
-                        <TextView
-                            android:id="@+id/headingTextView"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="2"
-                            android:text="N/A"
-                            android:textStyle="bold" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical">
-                        <TextView
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="RTK状態:" />
-                        <TextView
-                            android:id="@+id/rtkStatusTextView"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="2"
                             android:text="RTK: NONE"
-                            android:textStyle="bold" />
+                            android:textStyle="bold"
+                            android:textSize="16sp"
+                            android:textColor="@android:color/black"/>
                         <View
-                            android:id="@+id/rtkIndicatorView"
-                            android:layout_width="20dp"
-                            android:layout_height="20dp"
+                            android:id="@+id/rtkIndicatorView"  android:layout_width="16dp"
+                            android:layout_height="16dp"
                             android:background="@android:color/black"
                             android:layout_marginStart="8dp"/>
                     </LinearLayout>
@@ -269,7 +238,8 @@
                         android:layout_width="match_parent"
                         android:layout_height="200dp"  android:textSize="12sp"
                         android:fontFamily="monospace"
-                        android:scrollbars="vertical" /> </LinearLayout>
+                        android:scrollbars="vertical" />
+                </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
     </ScrollView>

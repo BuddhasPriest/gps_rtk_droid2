@@ -18,6 +18,7 @@ class UsbGpsConnection(
     private var ioManager: SerialInputOutputManager? = null
     private val executor = Executors.newSingleThreadExecutor()
     private var listener: GpsDataListener? = null
+    var isRunning: Boolean = false // ★追加: 接続状態を示すプロパティ
 
     interface GpsDataListener {
         fun onGpsDataReceived(data: String)
@@ -35,30 +36,29 @@ class UsbGpsConnection(
         }
 
         val driver = UsbSerialProber.getDefaultProber().probeDevice(usbDevice)
-            ?: throw IOException("互換性のあるUSBシリアルドライバーが見つかりません")
+            ?: throw IOException("互換性のあるUSBシリアルドライバが見つかりませんでした。")
 
-        serialPort = driver.ports.firstOrNull()
-            ?: throw IOException("シリアルポートが見つかりません")
+        // 最初のポートを使用する（通常、シリアルデバイスには1つしかポートがない）
+        serialPort = driver.ports[0]
 
         connection = usbManager.openDevice(usbDevice)
-            ?: throw IOException("USBデバイスを開けませんでした")
+            ?: throw IOException("USBデバイスへの接続を開けませんでした。")
 
-        serialPort?.apply {
-            open(connection)
-            setParameters(
-                115200,  // ボーレート
-                8,       // データビット
-                UsbSerialPort.STOPBITS_1,
-                UsbSerialPort.PARITY_NONE
-            )
-        }
+        serialPort?.open(connection)
+        serialPort?.setParameters(
+            115200, // ボーレート (例: 115200bps)
+            8,      // データビット
+            UsbSerialPort.STOPBITS_1, // ストップビット
+            UsbSerialPort.PARITY_NONE // パリティ
+        )
 
-        // ここが重要：SerialInputOutputManagerを初期化して開始する
+        // データ受信のためのIOマネージャーを設定
         ioManager = SerialInputOutputManager(serialPort, object : SerialInputOutputManager.Listener {
             override fun onNewData(data: ByteArray) {
-                // 受信したデータを文字列に変換してリスナーに渡す
-                val text = String(data, Charsets.UTF_8) // NMEAは通常UTF-8
-                listener?.onGpsDataReceived(text)
+                // 受信したバイトデータを文字列（NMEA）に変換してリスナーに通知
+                // GPSデバイスによってはUTF-8以外のエンコーディングの場合もあるので注意
+                val receivedData = String(data, Charsets.UTF_8)
+                listener?.onGpsDataReceived(receivedData)
             }
 
             override fun onRunError(e: Exception) {
@@ -67,8 +67,8 @@ class UsbGpsConnection(
             }
         })
 
-        // バックグラウンドスレッドでIOマネージャーを開始
         executor.execute { ioManager?.start() }
+        isRunning = true // ★追加: 接続開始時にtrueに設定
     }
 
     fun write(data: ByteArray) {
@@ -100,13 +100,14 @@ class UsbGpsConnection(
         try {
             connection?.close() // USBデバイス接続をクローズ
         } catch (e: Exception) { // UsbDeviceConnection.close()はIOExceptionをスローしないが念のため
-            closeError = "Usb Connection close error: ${e.message}"
+            closeError = "USB Device Connection close error: ${e.message}"
         } finally {
             connection = null
         }
+        isRunning = false // ★追加: 接続終了時にfalseに設定
 
         if (closeError != null) {
-            listener?.onError("USB GPS切断中にエラーが発生しました: $closeError")
+            listener?.onError("USB接続クローズエラー: $closeError")
         }
     }
 }

@@ -1,486 +1,532 @@
 package com.example.gps_rtk_droid2
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.text.method.ScrollingMovementMethod
+import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.example.gps_rtk_droid2.databinding.ActivityMainBinding
+import com.hoho.android.usbserial.driver.UsbSerialProber
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileWriter
+import java.io.IOException
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
-
-import android.os.PowerManager
-import android.os.Build
-import android.util.Log // Logクラスのインポートを追加
-
-import java.io.File // ★追加
-import java.io.FileWriter // ★追加
-import java.io.IOException // ★追加
-
-import android.view.WindowManager // 画面常時オンのデバッグ用
+import java.util.concurrent.LinkedBlockingQueue
 
 
-data class GpsData(
-    val timestamp: String,
-    val latitude: Double? = null,
-    val longitude: Double? = null,
-    val altitude: Double? = null,
-    val heading: Double? = null,
-    val rtkStatus: String? = null, // ★RTKステータスを追加
-    val rawNmea: String // 元のNMEAメッセージも保持
-)
+private const val PERMISSION_REQUEST_CODE = 100 // 値は任意
+
+// BuildConfig.APPLICATION_ID が解決できない、またはconst valの要件を満たさないため、
+// val に変更し、アプリケーションIDを直接指定するか、他の方法で取得します。
+// ここでは直接指定します。
+val ACTION_USB_PERMISSION = "com.example.gps_rtk_droid2.USB_PERMISSION" // valに変更
+
+// GpsRtkService.ktから移動した定数もここに含める
+const val ACTION_USB_DEVICE_ATTACHED = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
+const val ACTION_USB_DEVICE_DETACHED = "android.hardware.usb.action.USB_DEVICE_DETACHED"
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var binding: ActivityMainBinding
-    private lateinit var usbManager: UsbManager
-    private var usbDevice: UsbDevice? = null
-    private var usbGpsConnection: UsbGpsConnection? = null
-    private var ntripClient: NtripClient? = null
-    private val executor = Executors.newSingleThreadExecutor()
-    private val handler = Handler(Looper.getMainLooper())
-    private var isRunning = false
 
-    // PowerManagerとWakeLockのインスタンス
+    private lateinit var binding: ActivityMainBinding
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var isServiceRunning = false
+
+    // GPSデータ処理用のキューとコルーチンスコープ
+    private val gpsDataQueue = LinkedBlockingQueue<GpsData>()
+    private var logProcessingJob: Job? = null
+    private val logProcessingScope = CoroutineScope(Dispatchers.IO)
+
+    // WakeLock
     private lateinit var wakeLock: PowerManager.WakeLock
 
-    // USB接続のブロードキャストレシーバー
+    // CSVロギング関連
+    private val logFile by lazy {
+        val appSpecificExternalDir = getExternalFilesDir(null)
+        File(appSpecificExternalDir, "gps_log_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.csv")
+    }
+    private val fileLogWriter = Executors.newSingleThreadExecutor()
+    private var csvWriter: FileWriter? = null
+
+    // USBパーミッション要求のためのPendingIntent
+    private val usbPermissionIntent by lazy {
+        PendingIntent.getBroadcast(
+            this, 0, Intent(ACTION_USB_PERMISSION),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    // USBパーミッションとデバイス接続のためのBroadcastReceiver
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
-                    // checkUsbDeviceによって既にデバイスが見つかっているかを確認し、
-                    // 見つかっていない場合のみ新しいデバイスを設定してチェックを続行
-                    if (usbDevice == null) {
-                        usbDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                        checkUsbDevice() // 接続されたデバイスが目的のGPSデバイスか確認
+            if (ACTION_USB_PERMISSION == intent.action) {
+                synchronized(this) {
+                    val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    }
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        device?.let {
+                            Log.d("USB_PERMISSION", "USB permission granted for device: ${it.deviceName}")
+                            connectUsbDevice(it)
+                        }
+                    } else {
+                        Log.e("USB_PERMISSION", "USB permission denied for device: $device")
+                        Toast.makeText(context, "USBデバイスの権限が拒否されました", Toast.LENGTH_LONG).show()
                     }
                 }
-                ACTION_USB_PERMISSION -> {
-                    val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                    if (granted) {
-                        logMessage("USB Permission granted.")
-                        // パーミッションが付与された後、ここで自動的に接続を開始することも可能ですが、
-                        // 現在のコードではユーザーが「接続」ボタンを押すことを想定しています。
-                        // 例: startConnection()
+            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED == intent.action) {
+                val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+                device?.let {
+                    Log.d("USB_ATTACHED", "USB device attached: ${it.deviceName}")
+                    val manager = getSystemService(Context.USB_SERVICE) as UsbManager
+                    if (!manager.hasPermission(it)) {
+                        manager.requestPermission(it, usbPermissionIntent)
                     } else {
-                        logMessage("USB Permission denied.")
-                        usbDevice = null // パーミッションがないためusbDeviceをリセット
-                        Toast.makeText(context, "USBパーミッションが拒否されました", Toast.LENGTH_SHORT).show()
+                        connectUsbDevice(it)
                     }
+                }
+            } else if (UsbManager.ACTION_USB_DEVICE_DETACHED == intent.action) {
+                val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                }
+                device?.let {
+                    Log.d("USB_DETACHED", "USB device detached: ${it.deviceName}")
+                    stopGpsRtkService()
+                    binding.usbStatusTextView.text = "USB状態: 切断"
+                    Toast.makeText(context, "USBデバイスが取り外されました", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // ★デバッグ用: 画面を常にオンにするためのフラグを追加 (テスト用) ★
-        // ★この行は問題解決後に削除してください
+        // 画面を常にオンにする
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
-        usbManager = getSystemService(USB_SERVICE) as UsbManager
+        // TextViewをスクロール可能にする (logTextViewを使用)
         binding.logTextView.movementMethod = ScrollingMovementMethod()
 
-        binding.connectButton.setOnClickListener { startConnection() }
-        binding.disconnectButton.setOnClickListener { stopConnection() }
-
-        updateUiState(false)
-
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "gps_rtk_droid2::MyWakeLockTag")
-
-        startMyForegroundService()
-
-        // デバッグ用: 接続されているUSBデバイスのVID/PIDをログに出力
-        // 実際のデバイスのVID/PIDを確認するために一時的に使用できます
-        // for (deviceEntry in usbManager.deviceList.entries) {
-        //     val device = deviceEntry.value
-        //     Log.d("USB_DEBUG", "Found USB Device: ${device.deviceName}, VID: 0x${device.vendorId.toString(16)}, PID: 0x${device.productId.toString(16)}")
-        // }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        checkUsbDevice()
-        val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED)
-        filter.addAction(ACTION_USB_PERMISSION) // USBパーミッションのアクションを追加
-
-        // Android 14 (API 34) 以降の対応
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            // RECEIVER_NOT_EXPORTED フラグを追加
-            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            // それ以前のAndroidバージョン
-            registerReceiver(usbReceiver, filter)
+        // NMEAデータ処理コルーチンの開始
+        logProcessingJob = logProcessingScope.launch {
+            while (isActive) {
+                try {
+                    val gpsData = gpsDataQueue.take() // キューからデータを取り出す
+                    logGpsDataToUi(gpsData) // UIに表示
+                    logGpsDataToFile(gpsData) // ファイルに保存
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    Log.e("MainActivity", "NMEA data processing interrupted", e)
+                    break
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Error processing NMEA data", e)
+                }
+            }
         }
-    }
 
+        // WakeLockの初期化
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GpsRtkDroid2::WakeLockTag")
 
-    override fun onPause() {
-        super.onPause()
-        unregisterReceiver(usbReceiver)
+        // USBパーミッションと接続/切断のBroadcastReceiverを登録
+        val filter = IntentFilter(ACTION_USB_PERMISSION).apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        registerReceiver(usbReceiver, filter)
+
+        // UIボタンのセットアップ
+        setupButtons()
+
+        // アプリ起動時に権限を確認・要求
+        checkAndRequestPermissions()
+
+        // CSV Writerの初期化
+        try {
+            csvWriter = FileWriter(logFile, true) // Append mode
+            if (logFile.length() == 0L) { // ファイルが空の場合のみヘッダーを書き込む
+                csvWriter?.append("Timestamp,Latitude,Longitude,Altitude,Heading,RTK Status,Raw NMEA\n")
+            }
+            csvWriter?.flush()
+            Log.i("FILE_LOG_WRITER", "CSV writer initialized successfully.")
+        } catch (e: IOException) {
+            Log.e("FILE_LOG_WRITER", "Error initializing CSV writer: ${e.message}")
+            Toast.makeText(this, "CSVファイルの初期化に失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopConnection()
-        stopMyForegroundService()
-    }
-
-    private fun checkUsbDevice() {
-        val deviceList = usbManager.deviceList
-        // YOUR_VENDOR_ID と YOUR_PRODUCT_ID はXMLから読み込む想定
-        // ここでは仮の値を設定しています。実際のアプリケーションではXMLから取得してください。
-        // 例: val YOUR_VENDOR_ID = resources.getInteger(R.integer.gps_vendor_id)
-        // 例: val YOUR_PRODUCT_ID = resources.getInteger(R.integer.gps_product_id)
-        val YOUR_VENDOR_ID = 1027// 仮のベンダーID。XMLから読み込む値に置き換えてください。
-        val YOUR_PRODUCT_ID = 24577 // 仮のプロダクトID。XMLから読み込む値に置き換えてください。
-
-        usbDevice = deviceList.values.firstOrNull { device ->
-            device.vendorId == YOUR_VENDOR_ID && device.productId == YOUR_PRODUCT_ID
+        // WakeLockの解放
+        if (wakeLock.isHeld) {
+            wakeLock.release()
         }
 
-        if (usbDevice == null) {
-            logMessage("USB GPSデバイスが接続されていません")
-            Toast.makeText(this, "USB GPSデバイスが見つかりません", Toast.LENGTH_LONG).show()
-        } else {
-            logMessage("USB GPSデバイスを検出: ${usbDevice?.deviceName}")
-            requestUsbPermission()
+        // サービスが実行中の場合は停止する
+        stopGpsRtkService()
+
+        // BroadcastReceiverの登録解除
+        unregisterReceiver(usbReceiver)
+
+        // NMEAデータ処理コルーチンのキャンセル
+        logProcessingJob?.cancel()
+
+        // CSV Writerのクローズ
+        try {
+            csvWriter?.flush()
+            csvWriter?.close()
+            csvWriter = null
+            Log.i("FILE_LOG_WRITER", "CSV writer closed successfully.")
+        } catch (e: IOException) {
+            Log.e("FILE_LOG_WRITER", "Error closing CSV writer: ${e.message}")
+        }
+        fileLogWriter.shutdown() // ExecutorServiceをシャットダウン
+
+        Log.d("MainActivity", "onDestroy called")
+    }
+
+    private fun setupButtons() {
+        // startServiceButtonとstopServiceButtonが存在することをactivity_main.xmlで確認済み
+        binding.startServiceButton.setOnClickListener {
+            checkAndRequestPermissions()
+        }
+
+        binding.stopServiceButton.setOnClickListener {
+            stopGpsRtkService()
         }
     }
 
-    private fun requestUsbPermission() {
-        usbDevice?.let { device ->
-            val permissionIntent = PendingIntent.getBroadcast(
-                this, 0,
-                Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    private fun checkAndRequestPermissions() {
+        val requiredPermissions = mutableListOf<String>().apply {
+            add(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            add(android.Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(android.Manifest.permission.FOREGROUND_SERVICE_LOCATION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                add(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            }
+        }
+
+        val permissionsToRequest = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
+
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissionsToRequest,
+                PERMISSION_REQUEST_CODE
             )
-            usbManager.requestPermission(device, permissionIntent)
-        }
-    }
-
-    private fun startConnection() {
-        if (isRunning) {
-            logMessage("既に接続中です")
-            return
-        }
-
-        if (usbDevice == null) {
-            logMessage("USB GPSデバイスが選択されていません。デバイスを確認してください。")
-            Toast.makeText(this, "USB GPSデバイスが未接続です", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val server = binding.ntripServerEditText.text.toString()
-        val port = binding.ntripPortEditText.text.toString().toIntOrNull() ?: 2101
-        val mountPoint = binding.ntripMountpointEditText.text.toString()
-        val username = binding.ntripUserEditText.text.toString()
-        val password = binding.ntripPasswordEditText.text.toString()
-
-        if (server.isEmpty() || mountPoint.isEmpty()) {
-            logMessage("NTRIPサーバーとマウントポイントを入力してください")
-            Toast.makeText(this, "NTRIP設定が不完全です", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            // UsbGpsConnectionの初期化時にusbDeviceがnullでないことを保証
-            usbGpsConnection = UsbGpsConnection(usbManager, usbDevice!!).apply {
-                setDataListener(object : UsbGpsConnection.GpsDataListener {
-                    override fun onGpsDataReceived(data: String) {
-                        Log.d("GPS_RAW_RECEIVE", "Raw NMEA data received: $data")
-                        parseGpsData(data) // ★ここに修正を加え、ファイル保存ロジックを追加
-                    }
-
-                    override fun onError(error: String) {
-                        logMessage("GPSエラー: $error")
-                        handler.post { Toast.makeText(this@MainActivity, "GPSエラー: $error", Toast.LENGTH_LONG).show() }
-                        stopConnection()
-                    }
-                })
-                openConnection()
-            }
-
-            ntripClient = NtripClient(server, port, mountPoint, username, password,
-                object : NtripClient.NtripClientListener {
-                    override fun onRtcmDataReceived(data: ByteArray) {
-                        usbGpsConnection?.write(data)
-                    }
-
-                    override fun onStatusChanged(message: String) {
-                        logMessage(message)
-                        handler.post { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() } // 追加
-                    }
-
-                    override fun onError(error: String) {
-                        logMessage("NTRIPエラー: $error")
-                        handler.post { Toast.makeText(this@MainActivity, "NTRIPエラー: $error", Toast.LENGTH_LONG).show() } // 追加
-                        stopConnection()
-                    }
-                })
-
-            executor.execute {
-                ntripClient?.connect()
-            }
-
-            isRunning = true
-            updateUiState(true)
-            logMessage("接続を開始しました")
-            Toast.makeText(this, "接続を開始しました", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            logMessage("接続エラー: ${e.message}")
-            handler.post { Toast.makeText(this, "接続エラー: ${e.message}", Toast.LENGTH_LONG).show() }
-            stopConnection()
-        }
-    }
-
-    private fun stopConnection() {
-        if (!isRunning) return
-
-        try {
-            ntripClient?.disconnect()
-            usbGpsConnection?.closeConnection()
-            logMessage("接続を停止しました")
-            Toast.makeText(this, "接続を停止しました", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            logMessage("切断エラー: ${e.message}")
-            handler.post { Toast.makeText(this, "切断エラー: ${e.message}", Toast.LENGTH_LONG).show() }
-        } finally {
-            ntripClient = null
-            usbGpsConnection = null
-            isRunning = false
-            updateUiState(false)
-        }
-    }
-
-    // ★この関数を修正し、GpsDataオブジェクトをログファイルに保存するように変更
-    private fun parseGpsData(data: String) {
-        val parsedData = parseNmeaSentence(data) // NMEAセンテンスをパースしてGpsDataオブジェクトを取得
-
-        if (parsedData != null) {
-            // UI更新
-            handler.post {
-                parsedData.latitude?.let { lat ->
-                    val latHemi = if (lat < 0) "S" else "N"
-                    binding.latitudeTextView.text = "%.6f %s".format(Math.abs(lat), latHemi)
-                } ?: run { binding.latitudeTextView.text = "N/A" }
-
-                parsedData.longitude?.let { lon ->
-                    val lonHemi = if (lon < 0) "W" else "E"
-                    binding.longitudeTextView.text = "%.6f %s".format(Math.abs(lon), lonHemi)
-                } ?: run { binding.longitudeTextView.text = "N/A" }
-
-                parsedData.altitude?.let { alt ->
-                    binding.altitudeTextView.text = "%.2f m".format(alt)
-                } ?: run { binding.altitudeTextView.text = "N/A" }
-
-                parsedData.rtkStatus?.let { status ->
-                    updateRtkStatus(status)
-                } ?: run { updateRtkStatus("NONE") } // RTKステータスがない場合はNONEを表示
-            }
-
-            // ★パースされたGPSデータをファイルにログ保存
-            logParsedGpsDataToFile(parsedData)
         } else {
-            // パースできなかったNMEAセンテンスもログに残す
-            logMessage("NMEAパース失敗: $data")
+            // 全ての権限が既に許可されている場合、サービスを開始
+            startMyForegroundService()
+            Toast.makeText(this, "全ての権限が許可されています。", Toast.LENGTH_SHORT).show()
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            val allPermissionsGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (allPermissionsGranted) {
+                startMyForegroundService()
+                Toast.makeText(this, "必要な権限が許可されました。", Toast.LENGTH_SHORT).show()
+            } else {
+                var showRationale = false
+                for (permission in permissions) {
+                    if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+                        if (ActivityCompat.shouldShowRequestPermissionRationale(this, permission)) {
+                            showRationale = true
+                            break
+                        }
+                    }
+                }
 
-    private fun updateRtkStatus(status: String) {
-        val (color, text) = when (status) {
-            "FIX" -> Pair(android.graphics.Color.GREEN, "RTK: FIX")
-            "FLOAT" -> Pair(android.graphics.Color.RED, "RTK: FLOAT")
-            else -> Pair(android.graphics.Color.BLACK, "RTK: NONE")
-        }
-
-        binding.rtkStatusTextView.setTextColor(color)
-        binding.rtkStatusTextView.text = text
-        binding.rtkIndicatorView.setBackgroundColor(color)
-    }
-
-    private fun logMessage(message: String) {
-        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-        val logMessage = "$timestamp $message\n"
-
-        handler.post {
-            binding.logTextView.append(logMessage)
-            val layout = binding.logTextView.layout
-            if (layout != null) {
-                val scrollAmount = layout.getLineTop(binding.logTextView.lineCount) - binding.logTextView.height
-                if (scrollAmount > 0) {
-                    binding.logTextView.scrollTo(0, scrollAmount)
+                if (showRationale) {
+                    Toast.makeText(
+                        this,
+                        "このアプリは位置情報権限が必要です。再度許可してください。",
+                        Toast.LENGTH_LONG
+                    ).show()
                 } else {
-                    binding.logTextView.scrollTo(0, 0)
+                    Toast.makeText(
+                        this,
+                        "必要な権限が永続的に拒否されました。設定から手動で許可してください。",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", packageName, null)
+                    )
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(intent)
+                    finish()
                 }
             }
         }
-    }
-
-    private fun updateUiState(connected: Boolean) {
-        binding.connectButton.isEnabled = !connected
-        binding.disconnectButton.isEnabled = connected
-
-        val fields = listOf(
-            binding.ntripServerEditText,
-            binding.ntripPortEditText,
-            binding.ntripMountpointEditText,
-            binding.ntripUserEditText,
-            binding.ntripPasswordEditText
-        )
-
-        fields.forEach { it.isEnabled = !connected }
-    }
-
-    companion object {
-        const val ACTION_USB_PERMISSION = "com.example.gps_rtk_droid2.USB_PERMISSION"
-        // XMLから読み込むためのプレースホルダー。実際の値に置き換えるか、XML読み込み処理を実装してください。
-        // const val YOUR_VENDOR_ID = 0x1234
-        // const val YOUR_PRODUCT_ID = 0x5678
     }
 
     private fun startMyForegroundService() {
-        val serviceIntent = Intent(this, GpsRtkService::class.java)
-        serviceIntent.putExtra("inputExtra", "バックグラウンド処理を開始しました")
+        if (!isServiceRunning) {
+            if (!wakeLock.isHeld) {
+                wakeLock.acquire()
+                Log.d("MainActivity", "WakeLock acquired.")
+            }
 
-        // Android 8.0 (API レベル 26) 以降では startForegroundService を使用
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
+            val serviceIntent = Intent(this, GpsRtkService::class.java).apply {
+                action = GpsRtkService.ACTION_START_FOREGROUND_SERVICE
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            isServiceRunning = true
+            binding.serviceStatusTextView.text = "サービス状態: 実行中"
+            Toast.makeText(this, "GPS RTKサービスを開始しました。", Toast.LENGTH_SHORT).show()
+            Log.d("MainActivity", "GPS RTK service started.")
+
+            val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+            val deviceList = usbManager.deviceList
+            Log.d("MainActivity", "Found USB devices: ${deviceList.size}")
+            if (deviceList.isEmpty()) {
+                binding.usbStatusTextView.text = "USB状態: デバイスなし"
+                Toast.makeText(this, "USBデバイスが見つかりません。", Toast.LENGTH_LONG).show()
+            } else {
+                for ((_, device) in deviceList) {
+                    Log.d("MainActivity", "USB Device: ${device.deviceName}, VendorId: ${device.vendorId}, ProductId: ${device.productId}")
+                    if (usbManager.hasPermission(device)) {
+                        connectUsbDevice(device)
+                        break
+                    } else {
+                        usbManager.requestPermission(device, usbPermissionIntent)
+                        break
+                    }
+                }
+            }
         } else {
+            Toast.makeText(this, "GPS RTKサービスは既に実行中です。", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopGpsRtkService() {
+        if (isServiceRunning) {
+            if (wakeLock.isHeld) {
+                wakeLock.release()
+                Log.d("MainActivity", "WakeLock released.")
+            }
+
+            val serviceIntent = Intent(this, GpsRtkService::class.java).apply {
+                action = GpsRtkService.ACTION_STOP_FOREGROUND_SERVICE
+            }
             startService(serviceIntent)
+            isServiceRunning = false
+            binding.serviceStatusTextView.text = "サービス状態: 停止中"
+            binding.usbStatusTextView.text = "USB状態: 未接続"
+            Toast.makeText(this, "GPS RTKサービスを停止しました。", Toast.LENGTH_SHORT).show()
+            Log.d("MainActivity", "GPS RTK service stopped.")
+        } else {
+            Toast.makeText(this, "GPS RTKサービスは実行されていません。", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun stopMyForegroundService() {
-        val serviceIntent = Intent(this, GpsRtkService::class.java)
-        stopService(serviceIntent)
-    }
+    // GpsRtkServiceからのデータを受信
+    private val gpsDataReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == GpsRtkService.ACTION_GPS_DATA_UPDATE) {
+                val timestamp = intent.getStringExtra("timestamp") ?: ""
+                val latitude = intent.getDoubleExtra("latitude", Double.NaN)
+                val longitude = intent.getDoubleExtra("longitude", Double.NaN)
+                val altitude = intent.getDoubleExtra("altitude", Double.NaN)
+                val heading = intent.getDoubleExtra("heading", Double.NaN)
+                val rtkStatus = intent.getStringExtra("rtkStatus")
+                val rawNmea = intent.getStringExtra("rawNmea") ?: ""
 
-    // NMEAセンテンスをパースしてGpsDataオブジェクトを生成する関数
-    private fun parseNmeaSentence(nmeaSentence: String): GpsData? {
-        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-
-        if (nmeaSentence.startsWith("\$GPGGA") || nmeaSentence.startsWith("\$GNGGA")) {
-            // GPGGAセンテンスのパース
-            val parts = nmeaSentence.split(",")
-            if (parts.size >= 10) { // GPGGAに必要な最低限のパート数
-                try {
-                    val latitudeStr = parts[2]
-                    val latDir = parts[3]
-                    val longitudeStr = parts[4]
-                    val lonDir = parts[5]
-                    val quality = parts[6].toIntOrNull() // 品質インジケータ
-                    val altitudeStr = parts[9] // 海抜からの高さ
-
-                    val latitude = convertNmeaToDecimalDegrees(latitudeStr, latDir)
-                    val longitude = convertNmeaToDecimalDegrees(longitudeStr, lonDir)
-                    val altitude = altitudeStr.toDoubleOrNull()
-
-                    val rtkStatus = when (quality) { // RTKステータスを決定
-                        4 -> "FIX"
-                        5 -> "FLOAT"
-                        else -> "NONE"
-                    }
-
-                    return GpsData(
-                        timestamp,
-                        latitude,
-                        longitude,
-                        altitude,
-                        rtkStatus = rtkStatus, // ★RTKステータスをGpsDataに含める
-                        rawNmea = nmeaSentence
-                    )
-                } catch (e: Exception) {
-                    Log.e("NMEA_PARSE", "GPGGAパースエラー: ${e.message} (元データ: $nmeaSentence)")
-                    return null
-                }
-            }
-        } else if (nmeaSentence.startsWith("\$GPHDT") || nmeaSentence.startsWith("\$GNHDT")) {
-            // HDTセンテンスのパース (ヘディング)
-            val parts = nmeaSentence.split(",")
-            if (parts.size >= 2) {
-                try {
-                    val heading = parts[1].toDoubleOrNull()
-                    return GpsData(timestamp, heading = heading, rawNmea = nmeaSentence)
-                } catch (e: Exception) {
-                    Log.e("NMEA_PARSE", "HDTパースエラー: ${e.message} (元データ: $nmeaSentence)")
-                    return null
-                }
+                val gpsData = GpsData(
+                    timestamp = timestamp,
+                    latitude = if (latitude.isNaN()) null else latitude,
+                    longitude = if (longitude.isNaN()) null else longitude,
+                    altitude = if (altitude.isNaN()) null else altitude,
+                    heading = if (heading.isNaN()) null else heading,
+                    rtkStatus = rtkStatus,
+                    rawNmea = rawNmea
+                )
+                gpsDataQueue.offer(gpsData) // ここでキューにデータを追加
             }
         }
-        // 認識できないセンテンス、またはパースできなかった場合はnullを返す
-        return null
     }
 
-    // NMEA形式の緯度・経度を10進数形式に変換するヘルパー関数
-    private fun convertNmeaToDecimalDegrees(nmeaCoord: String, direction: String): Double? {
-        if (nmeaCoord.length < 5) return null // ddmm.mmmm の形式を想定
-        try {
-            val dotIndex = nmeaCoord.indexOf(".")
-            if (dotIndex == -1 || dotIndex < 2) return null // ドットがないか、形式が不正
-
-            val degrees = nmeaCoord.substring(0, dotIndex - 2).toDouble()
-            val minutes = nmeaCoord.substring(dotIndex - 2).toDouble()
-            var decimalDegrees = degrees + (minutes / 60.0)
-
-            if (direction == "S" || direction == "W") {
-                decimalDegrees *= -1.0
-            }
-            return decimalDegrees
-        } catch (e: Exception) {
-            Log.e("NMEA_CONVERT", "NMEA座標変換エラー: ${e.message} (元データ: $nmeaCoord $direction)")
-            return null
+    override fun onResume() {
+        super.onResume()
+        val filter = IntentFilter(GpsRtkService.ACTION_GPS_DATA_UPDATE)
+        // RECEIVER_NOT_EXPORTEDはAndroid 12 (API 31)以降で推奨されるフラグ
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // API 33から推奨
+            registerReceiver(gpsDataReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(gpsDataReceiver, filter)
         }
     }
 
-    // パース済みGPSデータをファイルにログ保存する関数
-    private fun logParsedGpsDataToFile(gpsData: GpsData) {
-        Log.d("FILE_LOG_WRITER", "Attempting to write GPS data to file for timestamp: ${gpsData.timestamp}")
+    override fun onPause() {
+        super.onPause()
+        unregisterReceiver(gpsDataReceiver)
+    }
 
-        executor.execute { // ファイル書き込みはI/O操作なので別スレッドで実行
+    // activity_main.xml の UI部品IDに合わせて修正
+    private fun logGpsDataToUi(data: GpsData) {
+        uiHandler.post {
+            // NMEAログ表示用のTextView (logTextViewを使用)
+            binding.logTextView.append("${data.rawNmea}\n")
+            val scrollAmount = binding.logTextView.layout?.getLineTop(binding.logTextView.lineCount)!! - binding.logTextView.height
+            if (scrollAmount > 0) {
+                binding.logTextView.scrollTo(0, scrollAmount)
+            }
+
+            // 個別のGPSデータ表示用TextViewを更新
+            binding.latitudeValueTextView.text = data.latitude?.toString() ?: "N/A"
+            binding.longitudeValueTextView.text = data.longitude?.toString() ?: "N/A"
+            binding.altitudeValueTextView.text = data.altitude?.toString() ?: "N/A"
+            binding.headingValueTextView.text = data.heading?.toString() ?: "N/A"
+            binding.rtkStatusValueTextView.text = data.rtkStatus ?: "N/A"
+            binding.timestampValueTextView.text = data.timestamp
+        }
+    }
+
+    private fun logGpsDataToFile(data: GpsData) {
+        fileLogWriter.execute {
             try {
-                // アプリ固有の外部ストレージディレクトリにCSV形式で保存
-                // 例: /sdcard/Android/data/com.example.gps_rtk_droid2/files/gps_rtk_parsed_log.csv
-                val logFile = File(getExternalFilesDir(null), "gps_rtk_parsed_log.csv")
-
-                // ヘッダー行を書き込む (ファイルが新規作成される場合のみ)
-                if (!logFile.exists()) {
-                    FileWriter(logFile, true).use { writer ->
-                        writer.append("Timestamp,Latitude,Longitude,Altitude,Heading,RtkStatus,RawNMEA\n") // ★ヘッダーにRtkStatusを追加
-                        //writer.flush()
+                // csvWriterがnullの場合、またはエラー後の再試行で、再初期化を試みる
+                if (csvWriter == null) {
+                    try {
+                        csvWriter = FileWriter(logFile, true) // 再初期化（追記モード）
+                        // ファイルが空の場合のみヘッダーを再度書き込む
+                        if (logFile.length() == 0L) {
+                            csvWriter?.append("Timestamp,Latitude,Longitude,Altitude,Heading,RTK Status,Raw NMEA\n")
+                        }
+                        csvWriter?.flush()
+                        Log.i("FILE_LOG_WRITER", "CSV writer re-initialized successfully after being null.")
+                    } catch (e: IOException) {
+                        Log.e("FILE_LOG_WRITER", "Error re-initializing CSV writer: ${e.message}")
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(this, "CSVファイル初期化エラー (再試行): ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                        return@execute // 再初期化に失敗したら、今回の書き込みはスキップ
                     }
                 }
 
-                // データ行を書き込む (CSV形式)
-                FileWriter(logFile, true).use { writer ->
-                    writer.append("${gpsData.timestamp}," +
-                            "${gpsData.latitude?.let { "%.6f".format(it) } ?: ""}," +
-                            "${gpsData.longitude?.let { "%.6f".format(it) } ?: ""}," +
-                            "${gpsData.altitude?.let { "%.3f".format(it) } ?: ""}," +
-                            "${gpsData.heading?.let { "%.2f".format(it) } ?: ""}," +
-                            "${gpsData.rtkStatus ?: ""}," + // ★RTKステータスを追加
-                            "\"${gpsData.rawNmea}\"\n") // CSVでカンマを含む場合のために引用符で囲む
-                    //writer.flush()
-                }
-                Log.d("FILE_LOG_WRITER", "Successfully wrote GPS data to file for timestamp: ${gpsData.timestamp}")
+                Log.d("FILE_LOG_WRITER", "Attempting to write GPS data to file for timestamp: ${data.timestamp}")
+                // null許容型に合わせてデフォルト値を与える (?: "")
+                // NMEAメッセージ内のカンマと引用符を適切にエスケープ
+                val escapedRawNmea = data.rawNmea.replace("\"", "\"\"") // 内部の引用符を二重化
+                val line = "${data.timestamp},${data.latitude ?: ""},${data.longitude ?: ""},${data.altitude ?: ""},${data.heading ?: ""},${data.rtkStatus ?: ""},\"$escapedRawNmea\"\n"
+                csvWriter?.append(line)
+                csvWriter?.flush() // 各書き込み後に即座にフラッシュ
+                Log.d("FILE_LOG_WRITER", "Successfully wrote GPS data to file for timestamp: ${data.timestamp}")
             } catch (e: IOException) {
-                Log.e("MainActivity", "パース済みログファイルへの書き込みエラー: ${e.message}")
-                Log.e("FILE_LOG_ERROR", "Error writing GPS data to file: ${e.message}", e)
+                Log.e("FILE_LOG_WRITER", "Error writing GPS data to file: ${e.message}")
+                // ここで csvWriter をクローズしたり null に設定したりしない
+                // 次の試行で回復するか、再初期化ロジックが働くことを期待する
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this, "CSVファイル書き込みエラー: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
         }
+    }
+
+    private fun connectUsbDevice(device: UsbDevice) {
+        val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        val connection = usbManager.openDevice(device)
+        if (connection == null) {
+            Toast.makeText(this, "USBデバイスへの接続に失敗しました。", Toast.LENGTH_LONG).show()
+            binding.usbStatusTextView.text = "USB状態: 接続失敗"
+            return
+        }
+
+        try {
+            val serialPort = findSerialPort(device, usbManager) // usbManagerを渡す
+            if (serialPort == null) {
+                Toast.makeText(this, "対応するUSBシリアルポートが見つかりませんでした。", Toast.LENGTH_LONG).show()
+                binding.usbStatusTextView.text = "USB状態: シリアルポートなし"
+                connection.close()
+                return
+            }
+
+            val serviceIntent = Intent(this, GpsRtkService::class.java).apply {
+                action = GpsRtkService.ACTION_USB_DEVICE_READY
+                putExtra("USB_DEVICE", device)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+
+            binding.usbStatusTextView.text = "USB状態: 接続済み (${device.deviceName})"
+            Toast.makeText(this, "USBデバイス接続成功: ${device.deviceName}", Toast.LENGTH_SHORT).show()
+
+        } catch (e: IOException) {
+            Log.e("MainActivity", "USB接続中にエラーが発生しました: ${e.message}", e)
+            Toast.makeText(this, "USB接続エラー: ${e.message}", Toast.LENGTH_LONG).show()
+            binding.usbStatusTextView.text = "USB状態: エラー"
+            connection.close()
+        }
+    }
+
+    // findSerialPortの修正: usbManagerを受け取るように
+    private fun findSerialPort(device: UsbDevice, usbManager: UsbManager): com.hoho.android.usbserial.driver.UsbSerialPort? {
+        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        for (driver in drivers) {
+            for (port in driver.ports) {
+                if (port.device == device) {
+                    return port
+                }
+            }
+        }
+        return null
     }
 }
