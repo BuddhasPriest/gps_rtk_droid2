@@ -20,6 +20,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 // GpsDataクラスをService内に定義
 data class GpsData(
@@ -39,7 +40,8 @@ class GpsRtkService : Service() {
     private var usbGpsConnection: UsbGpsConnection? = null
     private var ntripClient: NtripClient? = null
     private var writer: FileWriter? = null
-    private var isRunning = false
+    private val isRunning = AtomicBoolean(false)
+    private val isFileWriterOpen = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
@@ -47,24 +49,32 @@ class GpsRtkService : Service() {
         Log.d(TAG, "Service created")
 
         // ファイルライターを初期化
+        initFileWriter()
+    }
+
+    private fun initFileWriter() {
         try {
             val logFile = File(getExternalFilesDir(null), "gps_rtk_raw_log.csv")
             val fileExists = logFile.exists()
             writer = FileWriter(logFile, true) // 追記モード
+            isFileWriterOpen.set(true)
+
             // ファイルが存在しない場合のみヘッダーを書き込む
             if (!fileExists) {
                 writer?.append("Time,Lat,Lon,Alt,Heading,Rtk,Raw\n")
                 writer?.flush()
             }
+            Log.d(TAG, "File writer initialized successfully")
         } catch (e: IOException) {
             Log.e(TAG, "File open error: ${e.message}", e)
+            isFileWriterOpen.set(false)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                if (!isRunning) {
+                if (!isRunning.get()) {
                     val input = intent.getStringExtra("inputExtra") ?: "GPSデータ処理中..."
                     startForeground(NOTIFICATION_ID, createNotification(input))
 
@@ -111,7 +121,8 @@ class GpsRtkService : Service() {
                     }
                     override fun onError(error: String) {
                         logToActivity("GPSエラー: $error")
-                        stopGpsAndNtripConnection()
+                        // GPSエラーでも接続を維持する場合はコメントアウト
+                        // stopGpsAndNtripConnection()
                     }
                 })
                 openConnection()
@@ -128,13 +139,14 @@ class GpsRtkService : Service() {
                     }
                     override fun onError(error: String) {
                         logToActivity("NTRIPエラー: $error")
-                        stopGpsAndNtripConnection()
+                        // NTRIPエラーでも接続を維持する場合はコメントアウト
+                        // stopGpsAndNtripConnection()
                     }
                 })
 
             executor.execute { ntripClient?.connect() }
 
-            isRunning = true
+            isRunning.set(true)
             logToActivity("接続を開始しました")
             broadcastConnectionStatus(true)
 
@@ -145,7 +157,7 @@ class GpsRtkService : Service() {
     }
 
     private fun stopGpsAndNtripConnection() {
-        if (!isRunning) return
+        if (!isRunning.get()) return
 
         try {
             ntripClient?.disconnect()
@@ -156,7 +168,7 @@ class GpsRtkService : Service() {
         } finally {
             ntripClient = null
             usbGpsConnection = null
-            isRunning = false
+            isRunning.set(false)
             broadcastConnectionStatus(false)
         }
     }
@@ -174,19 +186,59 @@ class GpsRtkService : Service() {
     }
 
     private fun logParsedGpsDataToFile(gpsData: GpsData) {
+        if (!isFileWriterOpen.get()) {
+            Log.w(TAG, "File writer is not open, attempting to reinitialize")
+            initFileWriter()
+        }
+
         executor.execute {
             try {
-                writer?.append(
-                    "${gpsData.timestamp}," +
-                            "${gpsData.latitude?.let { "%.6f".format(it) } ?: ""}," +
-                            "${gpsData.longitude?.let { "%.6f".format(it) } ?: ""}," +
-                            "${gpsData.altitude?.let { "%.3f".format(it) } ?: ""}," +
-                            "${gpsData.heading?.let { "%.2f".format(it) } ?: ""}," +
-                            "${gpsData.rtkStatus ?: ""}," +
-                            "\"${gpsData.rawNmea.replace("\"", "\"\"").trim()}\"\n")
-                writer?.flush()
+                if (writer != null && isFileWriterOpen.get()) {
+                    val csvLine = buildString {
+                        append(gpsData.timestamp)
+                        append(",")
+                        append(gpsData.latitude?.let { "%.6f".format(it) } ?: "")
+                        append(",")
+                        append(gpsData.longitude?.let { "%.6f".format(it) } ?: "")
+                        append(",")
+                        append(gpsData.altitude?.let { "%.3f".format(it) } ?: "")
+                        append(",")
+                        append(gpsData.heading?.let { "%.2f".format(it) } ?: "")
+                        append(",")
+                        append(gpsData.rtkStatus ?: "")
+                        append(",")
+                        append("\"${gpsData.rawNmea.replace("\"", "\"\"").trim()}\"")
+                        append("\n")
+                    }
+
+                    writer?.append(csvLine)
+                    writer?.flush()
+
+                    // 定期的にファイルを同期（オプション）
+                    if (System.currentTimeMillis() % 10000 < 100) { // 約10秒ごと
+                        try {
+                            writer?.close()
+                            initFileWriter()
+                        } catch (e: IOException) {
+                            Log.w(TAG, "File sync error: ${e.message}")
+                        }
+                    }
+                } else {
+                    Log.w(TAG, "Writer is null or file not open, data not logged: ${gpsData.timestamp}")
+                }
             } catch (e: IOException) {
                 Log.e(TAG, "Data write error: ${e.message}", e)
+                isFileWriterOpen.set(false)
+                // ファイル書き込みエラー時の再初期化を試行
+                try {
+                    writer?.close()
+                } catch (closeError: IOException) {
+                    Log.e(TAG, "Error closing writer: ${closeError.message}")
+                }
+                writer = null
+                // 次回のwriteで再初期化が試行される
+            } catch (e: Exception) {
+                Log.e(TAG, "Unexpected error in file logging: ${e.message}", e)
             }
         }
     }
@@ -194,9 +246,22 @@ class GpsRtkService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopGpsAndNtripConnection()
+
+        // ExecutorServiceを適切にシャットダウン
         executor.shutdown()
         try {
+            if (!executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+            }
+        } catch (e: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
+
+        // ファイルライターを確実にクローズ
+        try {
             writer?.close()
+            isFileWriterOpen.set(false)
         } catch (e: IOException) {
             Log.e(TAG, "File close error: ${e.message}", e)
         }
