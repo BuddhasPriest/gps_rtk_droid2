@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        //window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         usbManager = getSystemService(USB_SERVICE) as UsbManager
         binding.logTextView.movementMethod = ScrollingMovementMethod()
