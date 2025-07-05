@@ -19,6 +19,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -42,6 +43,11 @@ class GpsRtkService : Service() {
     private var writer: FileWriter? = null
     private val isRunning = AtomicBoolean(false)
     private val isFileWriterOpen = AtomicBoolean(false)
+
+    // 日本時間フォーマッター
+    private val jstFormatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Tokyo")
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -309,12 +315,17 @@ class GpsRtkService : Service() {
 
     // --- NMEA Parsing Logic ---
     private fun parseNmeaSentence(nmeaSentence: String): GpsData? {
-        val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+        // デフォルトの受信時刻（JST）
+        val defaultTimestamp = jstFormatter.format(Date())
 
         if (nmeaSentence.startsWith("\$GPGGA") || nmeaSentence.startsWith("\$GNGGA")) {
             val parts = nmeaSentence.split(",")
             if (parts.size >= 10) {
                 try {
+                    // UTC時刻の取得（フィールド1）
+                    val utcTimeString = parts[1]
+                    val timestamp = parseUtcTimeFromGGA(utcTimeString) ?: defaultTimestamp
+
                     val latitude = convertNmeaToDecimalDegrees(parts[2], parts[3])
                     val longitude = convertNmeaToDecimalDegrees(parts[4], parts[5])
                     val quality = parts[6].toIntOrNull()
@@ -335,7 +346,8 @@ class GpsRtkService : Service() {
             if (parts.size >= 2) {
                 try {
                     val heading = parts[1].toDoubleOrNull()
-                    return GpsData(timestamp, heading = heading, rawNmea = nmeaSentence)
+                    // HDTメッセージにはUTC時刻が含まれないので、受信時刻（JST）を使用
+                    return GpsData(defaultTimestamp, heading = heading, rawNmea = nmeaSentence)
                 } catch (e: Exception) {
                     Log.e("NMEA_PARSE", "HDT parse error: ${e.message} (Data: $nmeaSentence)")
                     return null
@@ -343,6 +355,38 @@ class GpsRtkService : Service() {
             }
         }
         return null
+    }
+
+    /**
+     * GGAメッセージからUTC時刻を解析して日本時間（JST）に変換
+     * @param utcTimeString GGAメッセージの時刻フィールド (例: "123456.789")
+     * @return JST時刻文字列 (例: "21:34:56.789") または null
+     */
+    private fun parseUtcTimeFromGGA(utcTimeString: String): String? {
+        if (utcTimeString.isBlank()) return null
+
+        try {
+            // UTC時刻の形式: HHMMSS.SSS または HHMMSS
+            val timeValue = utcTimeString.toDouble()
+            val hours = (timeValue / 10000).toInt()
+            val minutes = ((timeValue % 10000) / 100).toInt()
+            val seconds = timeValue % 100
+
+            // 時刻の妥当性チェック
+            if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds >= 60) {
+                Log.w("NMEA_PARSE", "Invalid UTC time values: $utcTimeString")
+                return null
+            }
+
+            // UTCから日本時間（JST）に変換（+9時間）
+            val jstHours = (hours + 9) % 24
+
+            // フォーマット: HH:MM:SS.SSS（JST）
+            return String.format(Locale.US, "%02d:%02d:%06.3f", jstHours, minutes, seconds)
+        } catch (e: Exception) {
+            Log.e("NMEA_PARSE", "UTC time parse error: ${e.message} (Data: $utcTimeString)")
+            return null
+        }
     }
 
     private fun convertNmeaToDecimalDegrees(nmeaCoord: String, direction: String): Double? {
