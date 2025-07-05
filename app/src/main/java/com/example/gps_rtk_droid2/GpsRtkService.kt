@@ -23,7 +23,6 @@ import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-// GpsDataクラスをService内に定義
 data class GpsData(
     val timestamp: String,
     val latitude: Double? = null,
@@ -44,7 +43,6 @@ class GpsRtkService : Service() {
     private val isRunning = AtomicBoolean(false)
     private val isFileWriterOpen = AtomicBoolean(false)
 
-    // 日本時間フォーマッター
     private val jstFormatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).apply {
         timeZone = TimeZone.getTimeZone("Asia/Tokyo")
     }
@@ -53,8 +51,6 @@ class GpsRtkService : Service() {
         super.onCreate()
         createNotificationChannel()
         Log.d(TAG, "Service created")
-
-        // ファイルライターを初期化
         initFileWriter()
     }
 
@@ -62,10 +58,9 @@ class GpsRtkService : Service() {
         try {
             val logFile = File(getExternalFilesDir(null), "gps_rtk_raw_log.csv")
             val fileExists = logFile.exists()
-            writer = FileWriter(logFile, true) // 追記モード
+            writer = FileWriter(logFile, true)
             isFileWriterOpen.set(true)
 
-            // ファイルが存在しない場合のみヘッダーを書き込む
             if (!fileExists) {
                 writer?.append("Time,Lat,Lon,Alt,Heading,Rtk,Raw\n")
                 writer?.flush()
@@ -81,10 +76,8 @@ class GpsRtkService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 if (!isRunning.get()) {
+                    startForeground(NOTIFICATION_ID, createNotification("GPSデータ処理中..."))
                     val input = intent.getStringExtra("inputExtra") ?: "GPSデータ処理中..."
-                    startForeground(NOTIFICATION_ID, createNotification(input))
-
-                    // IntentからNTRIPとUSBデバイスの情報を取得
                     val server = intent.getStringExtra("ntrip_server")
                     val port = intent.getIntExtra("ntrip_port", 2101)
                     val mountPoint = intent.getStringExtra("ntrip_mountpoint")
@@ -107,10 +100,10 @@ class GpsRtkService : Service() {
             }
             ACTION_STOP -> {
                 stopGpsAndNtripConnection()
-                stopSelf() // サービスを停止
+                stopSelf()
             }
         }
-        return START_NOT_STICKY // 予期せぬ終了時に自動再起動しない
+        return START_NOT_STICKY
     }
 
     private fun startGpsAndNtripConnection(
@@ -119,7 +112,6 @@ class GpsRtkService : Service() {
     ) {
         val usbManager = getSystemService(USB_SERVICE) as UsbManager
         try {
-            // USB GPS接続を開始
             usbGpsConnection = UsbGpsConnection(usbManager, usbDevice).apply {
                 setDataListener(object : UsbGpsConnection.GpsDataListener {
                     override fun onGpsDataReceived(data: String) {
@@ -127,14 +119,11 @@ class GpsRtkService : Service() {
                     }
                     override fun onError(error: String) {
                         logToActivity("GPSエラー: $error")
-                        // GPSエラーでも接続を維持する場合はコメントアウト
-                        // stopGpsAndNtripConnection()
                     }
                 })
                 openConnection()
             }
 
-            // NTRIPクライアント接続を開始
             ntripClient = NtripClient(server, port, mountPoint, username, password,
                 object : NtripClient.NtripClientListener {
                     override fun onRtcmDataReceived(data: ByteArray) {
@@ -145,8 +134,6 @@ class GpsRtkService : Service() {
                     }
                     override fun onError(error: String) {
                         logToActivity("NTRIPエラー: $error")
-                        // NTRIPエラーでも接続を維持する場合はコメントアウト
-                        // stopGpsAndNtripConnection()
                     }
                 })
 
@@ -220,8 +207,7 @@ class GpsRtkService : Service() {
                     writer?.append(csvLine)
                     writer?.flush()
 
-                    // 定期的にファイルを同期（オプション）
-                    if (System.currentTimeMillis() % 10000 < 100) { // 約10秒ごと
+                    if (System.currentTimeMillis() % 10000 < 100) {
                         try {
                             writer?.close()
                             initFileWriter()
@@ -235,14 +221,12 @@ class GpsRtkService : Service() {
             } catch (e: IOException) {
                 Log.e(TAG, "Data write error: ${e.message}", e)
                 isFileWriterOpen.set(false)
-                // ファイル書き込みエラー時の再初期化を試行
                 try {
                     writer?.close()
                 } catch (closeError: IOException) {
                     Log.e(TAG, "Error closing writer: ${closeError.message}")
                 }
                 writer = null
-                // 次回のwriteで再初期化が試行される
             } catch (e: Exception) {
                 Log.e(TAG, "Unexpected error in file logging: ${e.message}", e)
             }
@@ -252,8 +236,6 @@ class GpsRtkService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopGpsAndNtripConnection()
-
-        // ExecutorServiceを適切にシャットダウン
         executor.shutdown()
         try {
             if (!executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -264,7 +246,6 @@ class GpsRtkService : Service() {
             Thread.currentThread().interrupt()
         }
 
-        // ファイルライターを確実にクローズ
         try {
             writer?.close()
             isFileWriterOpen.set(false)
@@ -274,7 +255,6 @@ class GpsRtkService : Service() {
         Log.d(TAG, "Service destroyed")
     }
 
-    // --- Activityとの通信用メソッド ---
     private fun logToActivity(message: String) {
         SharedData.logMessage.tryEmit("$message [${System.currentTimeMillis()}]")
     }
@@ -287,7 +267,6 @@ class GpsRtkService : Service() {
         SharedData.connectionStatus.tryEmit(isConnected)
     }
 
-    // --- Notification ---
     private fun createNotification(contentText: String): Notification {
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
@@ -313,16 +292,13 @@ class GpsRtkService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // --- NMEA Parsing Logic ---
     private fun parseNmeaSentence(nmeaSentence: String): GpsData? {
-        // デフォルトの受信時刻（JST）
         val defaultTimestamp = jstFormatter.format(Date())
 
         if (nmeaSentence.startsWith("\$GPGGA") || nmeaSentence.startsWith("\$GNGGA")) {
             val parts = nmeaSentence.split(",")
             if (parts.size >= 10) {
                 try {
-                    // UTC時刻の取得（フィールド1）
                     val utcTimeString = parts[1]
                     val timestamp = parseUtcTimeFromGGA(utcTimeString) ?: defaultTimestamp
 
@@ -346,7 +322,6 @@ class GpsRtkService : Service() {
             if (parts.size >= 2) {
                 try {
                     val heading = parts[1].toDoubleOrNull()
-                    // HDTメッセージにはUTC時刻が含まれないので、受信時刻（JST）を使用
                     return GpsData(defaultTimestamp, heading = heading, rawNmea = nmeaSentence)
                 } catch (e: Exception) {
                     Log.e("NMEA_PARSE", "HDT parse error: ${e.message} (Data: $nmeaSentence)")
@@ -357,31 +332,22 @@ class GpsRtkService : Service() {
         return null
     }
 
-    /**
-     * GGAメッセージからUTC時刻を解析して日本時間（JST）に変換
-     * @param utcTimeString GGAメッセージの時刻フィールド (例: "123456.789")
-     * @return JST時刻文字列 (例: "21:34:56.789") または null
-     */
     private fun parseUtcTimeFromGGA(utcTimeString: String): String? {
         if (utcTimeString.isBlank()) return null
 
         try {
-            // UTC時刻の形式: HHMMSS.SSS または HHMMSS
             val timeValue = utcTimeString.toDouble()
             val hours = (timeValue / 10000).toInt()
             val minutes = ((timeValue % 10000) / 100).toInt()
             val seconds = timeValue % 100
 
-            // 時刻の妥当性チェック
             if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds >= 60) {
                 Log.w("NMEA_PARSE", "Invalid UTC time values: $utcTimeString")
                 return null
             }
 
-            // UTCから日本時間（JST）に変換（+9時間）
             val jstHours = (hours + 9) % 24
 
-            // フォーマット: HH:MM:SS.SSS（JST）
             return String.format(Locale.US, "%02d:%02d:%06.3f", jstHours, minutes, seconds)
         } catch (e: Exception) {
             Log.e("NMEA_PARSE", "UTC time parse error: ${e.message} (Data: $utcTimeString)")
