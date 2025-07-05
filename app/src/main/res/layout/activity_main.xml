@@ -5,7 +5,6 @@
     <data>
     </data>
 
-
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -36,6 +35,21 @@
                         android:textSize="18sp"
                         android:textStyle="bold"
                         android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="NTRIP Server Selection"
+                        android:textSize="12sp"
+                        android:textColor="@android:color/darker_gray"
+                        android:layout_marginBottom="4dp" />
+
+                    <Spinner
+                        android:id="@+id/ntripServerSpinner"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="16dp"
+                        android:prompt="@string/ntrip_server_prompt" />
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"
@@ -267,9 +281,11 @@
                     <TextView
                         android:id="@+id/logTextView"
                         android:layout_width="match_parent"
-                        android:layout_height="200dp"  android:textSize="12sp"
+                        android:layout_height="200dp"
+                        android:textSize="12sp"
                         android:fontFamily="monospace"
-                        android:scrollbars="vertical" /> </LinearLayout>
+                        android:scrollbars="vertical" />
+                </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
     </ScrollView>

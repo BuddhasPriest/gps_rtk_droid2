@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
@@ -12,23 +13,47 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.method.ScrollingMovementMethod
-import android.view.WindowManager
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.gps_rtk_droid2.databinding.ActivityMainBinding
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+data class NtripServerInfo(
+    val server: String,
+    val port: Int,
+    val mountPoint: String,
+    val username: String,
+    val password: String,
+    val displayName: String = "$server:$port/$mountPoint"
+)
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var usbManager: UsbManager
+    private lateinit var sharedPreferences: SharedPreferences
+    private lateinit var gson: Gson
     private var usbDevice: UsbDevice? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    private var savedNtripServers = mutableListOf<NtripServerInfo>()
+    private lateinit var spinnerAdapter: ArrayAdapter<String>
+
+    companion object {
+        const val ACTION_USB_PERMISSION = "com.example.gps_rtk_droid2.USB_PERMISSION"
+        private const val PREFS_NAME = "ntrip_servers"
+        private const val KEY_SERVERS = "servers"
+    }
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -63,16 +88,150 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        //window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // SharedPreferencesとGsonを初期化
+        sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        gson = Gson()
 
         usbManager = getSystemService(USB_SERVICE) as UsbManager
         binding.logTextView.movementMethod = ScrollingMovementMethod()
 
-        binding.connectButton.setOnClickListener { startConnection() }
+        // 保存されたサーバー情報を読み込み
+        loadSavedServers()
+
+        // スピナーを設定
+        setupSpinner()
+
+        // ViewBindingを使用してクリックリスナーを設定
+        binding.connectButton.setOnClickListener {
+            saveCurrentServer() // 接続時に現在の設定を保存
+            startConnection()
+        }
         binding.disconnectButton.setOnClickListener { stopConnection() }
 
         updateUiState(false)
         observeSharedData()
+    }
+
+    private fun loadSavedServers() {
+        val serversJson = sharedPreferences.getString(KEY_SERVERS, null)
+        if (serversJson != null) {
+            val type = object : TypeToken<List<NtripServerInfo>>() {}.type
+            val servers: List<NtripServerInfo> = gson.fromJson(serversJson, type)
+            savedNtripServers.clear()
+            savedNtripServers.addAll(servers)
+        }
+
+        // デフォルトサーバーを追加（まだ保存されていない場合）
+        if (savedNtripServers.isEmpty()) {
+            savedNtripServers.add(
+                NtripServerInfo(
+                    server = "rtk2go.com",
+                    port = 2101,
+                    mountPoint = "ANY",
+                    username = "",
+                    password = ""
+                )
+            )
+            saveServers()
+        }
+    }
+
+    private fun saveServers() {
+        val serversJson = gson.toJson(savedNtripServers)
+        sharedPreferences.edit().putString(KEY_SERVERS, serversJson).apply()
+    }
+
+    private fun saveCurrentServer() {
+        val server = binding.ntripServerEditText.text.toString().trim()
+        val port = binding.ntripPortEditText.text.toString().toIntOrNull() ?: 2101
+        val mountPoint = binding.ntripMountpointEditText.text.toString().trim()
+        val username = binding.ntripUserEditText.text.toString().trim()
+        val password = binding.ntripPasswordEditText.text.toString().trim()
+
+        if (server.isEmpty() || mountPoint.isEmpty()) {
+            return // 必須項目が空の場合は保存しない
+        }
+
+        val newServer = NtripServerInfo(
+            server = server,
+            port = port,
+            mountPoint = mountPoint,
+            username = username,
+            password = password
+        )
+
+        // 既存のサーバーと重複チェック
+        val existingIndex = savedNtripServers.indexOfFirst {
+            it.server == newServer.server &&
+                    it.port == newServer.port &&
+                    it.mountPoint == newServer.mountPoint
+        }
+
+        if (existingIndex >= 0) {
+            // 既存のサーバーを更新
+            savedNtripServers[existingIndex] = newServer
+        } else {
+            // 新しいサーバーを追加
+            savedNtripServers.add(newServer)
+        }
+
+        saveServers()
+        updateSpinner()
+
+        Toast.makeText(this, "サーバー設定を保存しました", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun setupSpinner() {
+        val displayNames = mutableListOf<String>()
+        displayNames.add("新しいサーバー") // 最初の項目
+        displayNames.addAll(savedNtripServers.map { it.displayName })
+
+        spinnerAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, displayNames)
+        spinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        binding.ntripServerSpinner.adapter = spinnerAdapter
+
+        binding.ntripServerSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
+                if (position == 0) {
+                    // "新しいサーバー"が選択された場合、フィールドをクリア
+                    clearServerFields()
+                } else {
+                    // 保存されたサーバーが選択された場合、フィールドに設定
+                    val selectedServer = savedNtripServers[position - 1]
+                    loadServerToFields(selectedServer)
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>) {
+                // 何もしない
+            }
+        }
+    }
+
+    private fun updateSpinner() {
+        val displayNames = mutableListOf<String>()
+        displayNames.add("新しいサーバー")
+        displayNames.addAll(savedNtripServers.map { it.displayName })
+
+        spinnerAdapter.clear()
+        spinnerAdapter.addAll(displayNames)
+        spinnerAdapter.notifyDataSetChanged()
+    }
+
+    private fun clearServerFields() {
+        binding.ntripServerEditText.setText("")
+        binding.ntripPortEditText.setText("2101")
+        binding.ntripMountpointEditText.setText("")
+        binding.ntripUserEditText.setText("")
+        binding.ntripPasswordEditText.setText("")
+    }
+
+    private fun loadServerToFields(serverInfo: NtripServerInfo) {
+        binding.ntripServerEditText.setText(serverInfo.server)
+        binding.ntripPortEditText.setText(serverInfo.port.toString())
+        binding.ntripMountpointEditText.setText(serverInfo.mountPoint)
+        binding.ntripUserEditText.setText(serverInfo.username)
+        binding.ntripPasswordEditText.setText(serverInfo.password)
     }
 
     override fun onResume() {
@@ -225,14 +384,11 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiState(connected: Boolean) {
         binding.connectButton.isEnabled = !connected
         binding.disconnectButton.isEnabled = connected
+        binding.ntripServerSpinner.isEnabled = !connected
         binding.ntripServerEditText.isEnabled = !connected
         binding.ntripPortEditText.isEnabled = !connected
         binding.ntripMountpointEditText.isEnabled = !connected
         binding.ntripUserEditText.isEnabled = !connected
         binding.ntripPasswordEditText.isEnabled = !connected
-    }
-
-    companion object {
-        const val ACTION_USB_PERMISSION = "com.example.gps_rtk_droid2.USB_PERMISSION"
     }
 }
