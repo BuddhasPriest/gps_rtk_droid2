@@ -102,8 +102,10 @@ class MainActivity : AppCompatActivity() {
         setupSpinner()
 
         // ViewBindingを使用してクリックリスナーを設定
+        binding.saveButton.setOnClickListener {
+            saveCurrentServer()
+        }
         binding.connectButton.setOnClickListener {
-            saveCurrentServer() // 接続時に現在の設定を保存
             startConnection()
         }
         binding.disconnectButton.setOnClickListener { stopConnection() }
@@ -129,7 +131,8 @@ class MainActivity : AppCompatActivity() {
                     port = 2101,
                     mountPoint = "ANY",
                     username = "",
-                    password = ""
+                    password = "",
+                    displayName = "RTK2GO Default"
                 )
             )
             saveServers()
@@ -142,6 +145,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveCurrentServer() {
+        val serverName = binding.ntripServerNameEditText.text.toString().trim()
         val server = binding.ntripServerEditText.text.toString().trim()
         val port = binding.ntripPortEditText.text.toString().toIntOrNull() ?: 2101
         val mountPoint = binding.ntripMountpointEditText.text.toString().trim()
@@ -149,7 +153,23 @@ class MainActivity : AppCompatActivity() {
         val password = binding.ntripPasswordEditText.text.toString().trim()
 
         if (server.isEmpty() || mountPoint.isEmpty()) {
-            return // 必須項目が空の場合は保存しない
+            Toast.makeText(this, "サーバー名とマウントポイントは必須です", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // デフォルトの表示名を生成
+        val defaultDisplayName = "$server:$port/$mountPoint"
+
+        // ユーザーが入力した名前を使用、空の場合はデフォルトを使用
+        val finalDisplayName = if (serverName.isEmpty()) {
+            defaultDisplayName
+        } else {
+            // ユーザー入力がデフォルトと同じ場合はそのまま、異なる場合は両方表示
+            if (serverName == defaultDisplayName) {
+                serverName
+            } else {
+                "$serverName ($defaultDisplayName)"
+            }
         }
 
         val newServer = NtripServerInfo(
@@ -157,10 +177,11 @@ class MainActivity : AppCompatActivity() {
             port = port,
             mountPoint = mountPoint,
             username = username,
-            password = password
+            password = password,
+            displayName = finalDisplayName
         )
 
-        // 既存のサーバーと重複チェック
+        // 既存のサーバーと重複チェック（サーバー、ポート、マウントポイントで判定）
         val existingIndex = savedNtripServers.indexOfFirst {
             it.server == newServer.server &&
                     it.port == newServer.port &&
@@ -170,15 +191,25 @@ class MainActivity : AppCompatActivity() {
         if (existingIndex >= 0) {
             // 既存のサーバーを更新
             savedNtripServers[existingIndex] = newServer
+            Toast.makeText(this, "サーバー設定を更新しました", Toast.LENGTH_SHORT).show()
         } else {
             // 新しいサーバーを追加
             savedNtripServers.add(newServer)
+            Toast.makeText(this, "新しいサーバー設定を保存しました", Toast.LENGTH_SHORT).show()
         }
 
         saveServers()
         updateSpinner()
 
-        Toast.makeText(this, "サーバー設定を保存しました", Toast.LENGTH_SHORT).show()
+        // 保存後、スピナーで新しく保存されたサーバーを選択
+        val savedServerIndex = savedNtripServers.indexOfFirst {
+            it.server == newServer.server &&
+                    it.port == newServer.port &&
+                    it.mountPoint == newServer.mountPoint
+        }
+        if (savedServerIndex >= 0) {
+            binding.ntripServerSpinner.setSelection(savedServerIndex + 1) // +1 because of "新しいサーバー" at index 0
+        }
     }
 
     private fun setupSpinner() {
@@ -219,19 +250,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun clearServerFields() {
+        binding.ntripServerNameEditText.setText("")
         binding.ntripServerEditText.setText("")
         binding.ntripPortEditText.setText("2101")
         binding.ntripMountpointEditText.setText("")
         binding.ntripUserEditText.setText("")
         binding.ntripPasswordEditText.setText("")
+
+        // デフォルトのプレースホルダーを表示
+        updateServerNamePlaceholder()
     }
 
     private fun loadServerToFields(serverInfo: NtripServerInfo) {
+        // 表示名からユーザー入力部分を抽出
+        val displayName = serverInfo.displayName
+        val defaultName = "${serverInfo.server}:${serverInfo.port}/${serverInfo.mountPoint}"
+
+        val userName = if (displayName.contains(" (") && displayName.endsWith(")")) {
+            // "ユーザー名 (デフォルト名)" の形式の場合
+            displayName.substring(0, displayName.indexOf(" ("))
+        } else if (displayName == defaultName) {
+            // デフォルト名そのものの場合
+            ""
+        } else {
+            // その他の場合はそのまま
+            displayName
+        }
+
+        binding.ntripServerNameEditText.setText(userName)
         binding.ntripServerEditText.setText(serverInfo.server)
         binding.ntripPortEditText.setText(serverInfo.port.toString())
         binding.ntripMountpointEditText.setText(serverInfo.mountPoint)
         binding.ntripUserEditText.setText(serverInfo.username)
         binding.ntripPasswordEditText.setText(serverInfo.password)
+
+        updateServerNamePlaceholder()
+    }
+
+    private fun updateServerNamePlaceholder() {
+        val server = binding.ntripServerEditText.text.toString().trim()
+        val port = binding.ntripPortEditText.text.toString().trim()
+        val mountPoint = binding.ntripMountpointEditText.text.toString().trim()
+
+        if (server.isNotEmpty() && port.isNotEmpty() && mountPoint.isNotEmpty()) {
+            val defaultName = "$server:$port/$mountPoint"
+            binding.ntripServerNameEditText.hint = "例: $defaultName"
+        } else {
+            binding.ntripServerNameEditText.hint = "サーバー名（任意）"
+        }
     }
 
     override fun onResume() {
@@ -384,11 +450,32 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiState(connected: Boolean) {
         binding.connectButton.isEnabled = !connected
         binding.disconnectButton.isEnabled = connected
+        binding.saveButton.isEnabled = !connected
         binding.ntripServerSpinner.isEnabled = !connected
+        binding.ntripServerNameEditText.isEnabled = !connected
         binding.ntripServerEditText.isEnabled = !connected
         binding.ntripPortEditText.isEnabled = !connected
         binding.ntripMountpointEditText.isEnabled = !connected
         binding.ntripUserEditText.isEnabled = !connected
         binding.ntripPasswordEditText.isEnabled = !connected
+
+        // 接続中でない場合は、フィールドの変更を監視してプレースホルダーを更新
+        if (!connected) {
+            setupFieldChangeListeners()
+        }
+    }
+
+    private fun setupFieldChangeListeners() {
+        val textWatcher = object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                updateServerNamePlaceholder()
+            }
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+        }
+
+        binding.ntripServerEditText.addTextChangedListener(textWatcher)
+        binding.ntripPortEditText.addTextChangedListener(textWatcher)
+        binding.ntripMountpointEditText.addTextChangedListener(textWatcher)
     }
 }
