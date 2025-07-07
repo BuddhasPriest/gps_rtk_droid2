@@ -190,9 +190,9 @@ class GpsRtkService : Service() {
                     val csvLine = buildString {
                         append(gpsData.timestamp)
                         append(",")
-                        append(gpsData.latitude?.let { "%.6f".format(it) } ?: "")
+                        append(gpsData.latitude?.let { "%.10f".format(it) } ?: "")
                         append(",")
-                        append(gpsData.longitude?.let { "%.6f".format(it) } ?: "")
+                        append(gpsData.longitude?.let { "%.10f".format(it) } ?: "")
                         append(",")
                         append(gpsData.altitude?.let { "%.3f".format(it) } ?: "")
                         append(",")
